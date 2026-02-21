@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::io::Read;
 use std::net::Ipv4Addr;
 use std::str;
 
@@ -185,6 +187,51 @@ struct DnsPacket {
     header: DnsHeader,
     questions: Vec<DnsQuestion>,
     answers: Vec<DnsRecord>,
+    authorities: Vec<DnsRecord>,
+    resources: Vec<DnsRecord>,
+}
+
+impl DnsPacket {
+    fn from_bytes(buf: &[u8]) -> Option<Self> {
+        let mut packet_buf = PacketBuf::new(buf);
+
+        let header = packet_buf.header()?;
+
+        let mut questions = Vec::with_capacity(header.qdcount as usize);
+        for _ in 0..header.qdcount {
+            questions.push(packet_buf.question()?);
+        }
+
+        let mut answers = Vec::with_capacity(header.ancount as usize);
+        for _ in 0..header.ancount {
+            answers.push(packet_buf.record()?);
+        }
+
+        let mut authorities = Vec::with_capacity(header.nscount as usize);
+        for _ in 0..header.nscount {
+            authorities.push(packet_buf.record()?);
+        }
+
+        let mut resources = Vec::with_capacity(header.arcount as usize);
+        for _ in 0..header.arcount {
+            resources.push(packet_buf.record()?);
+        }
+
+        Some(DnsPacket {
+            header,
+            questions,
+            answers,
+            authorities,
+            resources,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_reader<R: Read>(mut reader: R) -> Option<Self> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).ok()?;
+        Self::from_bytes(&buf)
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -286,13 +333,7 @@ mod tests {
     use super::*;
 
     use std::fs::File;
-    use std::io::{self, BufReader, Read};
-
-    fn from_reader<R: Read>(mut reader: R) -> io::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
-        Ok(buf)
-    }
+    use std::io::BufReader;
 
     #[test]
     fn from_raw_bytes() {
@@ -312,34 +353,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_static() {
+    fn parse_response_packet() {
         let f = File::open("response_packet.txt").unwrap();
         let reader = BufReader::new(f);
+        let packet = DnsPacket::from_reader(reader).unwrap();
 
-        let buf = from_reader(reader).unwrap();
-        let mut packet_buf = PacketBuf::new(&buf);
+        assert_eq!(packet.header.id, 39761);
+        assert!(packet.header.qr);
+        assert_eq!(packet.header.opcode, 0);
+        assert!(!packet.header.aa);
+        assert!(!packet.header.tc);
+        assert!(packet.header.rd);
+        assert!(packet.header.ra);
+        assert!(!packet.header.z);
+        assert!(!packet.header.ad);
+        assert!(!packet.header.cd);
+        assert_eq!(packet.header.rcode, RCode::Noerror);
+        assert_eq!(packet.header.qdcount, 1);
+        assert_eq!(packet.header.ancount, 1);
+        assert_eq!(packet.header.nscount, 0);
+        assert_eq!(packet.header.arcount, 0);
 
-        let header = packet_buf.header().unwrap();
-        assert_eq!(header.id, 39761);
-        assert!(header.qr);
-        assert_eq!(header.opcode, 0);
-        assert!(!header.aa);
-        assert!(!header.tc);
-        assert!(header.rd);
-        assert!(header.ra);
-        assert!(!header.z);
-        assert!(!header.ad);
-        assert!(!header.cd);
-        assert_eq!(header.rcode, RCode::Noerror);
-        assert_eq!(header.qdcount, 1);
-        assert_eq!(header.ancount, 1);
-        assert_eq!(header.nscount, 0);
-        assert_eq!(header.arcount, 0);
-
-        let question = packet_buf.question().unwrap();
-        assert_eq!(question.name, "google.com");
-        assert_eq!(question.r#type, QueryType::A);
-        assert_eq!(question.class, 1);
+        let q = &packet.questions[0];
+        assert_eq!(q.name, "google.com");
+        assert_eq!(q.r#type, QueryType::A);
+        assert_eq!(q.class, 1);
 
         let DnsRecord::A {
             domain,
@@ -348,12 +386,37 @@ mod tests {
             ttl,
             len,
             ip,
-        } = packet_buf.record().unwrap();
+        } = &packet.answers[0];
         assert_eq!(domain, "google.com");
-        assert_eq!(r#type, QueryType::A);
-        assert_eq!(class, 1);
-        assert_eq!(ttl, 150);
-        assert_eq!(len, 4);
-        assert_eq!(ip, Ipv4Addr::new(142, 250, 197, 142));
+        assert_eq!(*r#type, QueryType::A);
+        assert_eq!(*class, 1);
+        assert_eq!(*ttl, 150);
+        assert_eq!(*len, 4);
+        assert_eq!(*ip, Ipv4Addr::new(142, 250, 197, 142));
+
+        assert!(packet.authorities.is_empty());
+        assert!(packet.resources.is_empty());
+    }
+
+    #[test]
+    fn parse_query_packet() {
+        let f = File::open("query_packet.txt").unwrap();
+        let reader = BufReader::new(f);
+        let packet = DnsPacket::from_reader(reader).unwrap();
+
+        assert!(!packet.header.qr);
+        assert_eq!(packet.header.qdcount, 1);
+        assert_eq!(packet.header.ancount, 0);
+        assert_eq!(packet.header.nscount, 0);
+        assert_eq!(packet.header.arcount, 0);
+
+        assert_eq!(packet.questions.len(), 1);
+        assert_eq!(packet.questions[0].name, "google.com");
+        assert_eq!(packet.questions[0].r#type, QueryType::A);
+        assert_eq!(packet.questions[0].class, 1);
+
+        assert!(packet.answers.is_empty());
+        assert!(packet.authorities.is_empty());
+        assert!(packet.resources.is_empty());
     }
 }
