@@ -1,3 +1,5 @@
+use std::str;
+
 const PACKET_SIZE: usize = 512;
 
 #[derive(Debug)]
@@ -68,6 +70,52 @@ impl<'a> PacketBuf<'a> {
             arcount,
         })
     }
+
+    fn question(&mut self) -> Option<DnsQuestion> {
+        let mut name = String::new();
+
+        let mut byte: u8 = self.read()?;
+        let msbs = byte ^ 0xC0;
+
+        if msbs != 0x00 {
+            loop {
+                let bytes = self.read_range(self.pos, byte as usize)?;
+                name.push_str(str::from_utf8(bytes).ok()?);
+
+                byte = self.read()?;
+                if byte == 0x00 {
+                    break;
+                }
+                name.push('.');
+            }
+        } else {
+            let byte_2: u8 = self.read()?;
+            let new_pos = (msbs as u16) << 8 | byte_2 as u16;
+            let curr_pos = self.pos;
+
+            self.pos = new_pos as usize;
+            loop {
+                let bytes = self.read_range(self.pos, byte as usize)?;
+                name.push_str(str::from_utf8(bytes).ok()?);
+
+                byte = self.read()?;
+                if byte == 0x00 {
+                    break;
+                }
+                name.push('.');
+            }
+            self.pos = curr_pos;
+        }
+
+        let r#type: u16 = self.read()?;
+        let class: u16 = self.read()?;
+
+        Some(DnsQuestion {
+            name,
+            r#type: QueryType::from(r#type),
+            class,
+        })
+    }
 }
 
 trait FromBytes: Sized {
@@ -99,6 +147,7 @@ impl FromBytes for u32 {
 #[derive(Debug)]
 struct DnsPacket {
     header: DnsHeader,
+    questions: Vec<DnsQuestion>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -160,6 +209,28 @@ struct DnsHeader {
     arcount: u16,
 }
 
+#[non_exhaustive]
+#[derive(Debug, PartialEq)]
+enum QueryType {
+    A,
+}
+
+impl From<u16> for QueryType {
+    fn from(value: u16) -> Self {
+        match value {
+            1 => QueryType::A,
+            _ => unimplemented!(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DnsQuestion {
+    name: String,
+    r#type: QueryType,
+    class: u16,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +285,10 @@ mod tests {
         assert_eq!(header.ancount, 1);
         assert_eq!(header.nscount, 0);
         assert_eq!(header.arcount, 0);
+
+        let question = packet_buf.question().unwrap();
+        assert_eq!(question.name, "google.com");
+        assert_eq!(question.r#type, QueryType::A);
+        assert_eq!(question.class, 1);
     }
 }
