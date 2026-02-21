@@ -2,12 +2,12 @@ const PACKET_SIZE: usize = 512;
 
 #[derive(Debug)]
 struct PacketBuf<'a> {
-    buf: &'a mut [u8],
+    buf: &'a [u8],
     pos: usize,
 }
 
 impl<'a> PacketBuf<'a> {
-    fn new(buf: &'a mut [u8]) -> Self {
+    fn new(buf: &'a [u8]) -> Self {
         let n = buf.len();
         assert!(0 < n && n <= PACKET_SIZE);
         Self { buf, pos: 0 }
@@ -175,8 +175,8 @@ mod tests {
 
     #[test]
     fn from_raw_bytes() {
-        let mut bytes = [155, 81, 129, 128];
-        let mut packet_buf = PacketBuf::new(&mut bytes[..]);
+        let bytes = [155, 81, 129, 128];
+        let mut packet_buf = PacketBuf::new(&bytes[..]);
 
         let one: u8 = packet_buf.read().unwrap();
         assert_eq!(one, 155);
@@ -195,8 +195,8 @@ mod tests {
         let f = File::open("response_packet.txt").unwrap();
         let reader = BufReader::new(f);
 
-        let mut buf = from_reader(reader).unwrap();
-        let mut packet_buf = PacketBuf::new(&mut buf);
+        let buf = from_reader(reader).unwrap();
+        let mut packet_buf = PacketBuf::new(&buf);
 
         let header = packet_buf.header().unwrap();
         assert_eq!(header.id, 39761);
