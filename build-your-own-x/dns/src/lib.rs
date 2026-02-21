@@ -1,6 +1,8 @@
+use std::net::Ipv4Addr;
 use std::str;
 
 const PACKET_SIZE: usize = 512;
+const MAX_NAME_JUMPS: u8 = 10;
 
 #[derive(Debug)]
 struct PacketBuf<'a> {
@@ -71,42 +73,27 @@ impl<'a> PacketBuf<'a> {
         })
     }
 
-    fn question(&mut self) -> Option<DnsQuestion> {
+    fn read_label(&mut self, mut byte: u8) -> Option<String> {
         let mut name = String::new();
 
-        let mut byte: u8 = self.read()?;
-        let msbs = byte ^ 0xC0;
+        loop {
+            let bytes = self.read_range(self.pos, byte as usize)?;
+            name.push_str(str::from_utf8(bytes).ok()?);
 
-        if msbs != 0x00 {
-            loop {
-                let bytes = self.read_range(self.pos, byte as usize)?;
-                name.push_str(str::from_utf8(bytes).ok()?);
-
-                byte = self.read()?;
-                if byte == 0x00 {
-                    break;
-                }
-                name.push('.');
+            byte = self.read()?;
+            if byte == 0x00 {
+                break;
             }
-        } else {
-            let byte_2: u8 = self.read()?;
-            let new_pos = (msbs as u16) << 8 | byte_2 as u16;
-            let curr_pos = self.pos;
-
-            self.pos = new_pos as usize;
-            loop {
-                let bytes = self.read_range(self.pos, byte as usize)?;
-                name.push_str(str::from_utf8(bytes).ok()?);
-
-                byte = self.read()?;
-                if byte == 0x00 {
-                    break;
-                }
-                name.push('.');
-            }
-            self.pos = curr_pos;
+            name.push('.');
         }
 
+        Some(name)
+    }
+
+    fn question(&mut self) -> Option<DnsQuestion> {
+        let byte: u8 = self.read()?;
+
+        let name = self.read_label(byte)?;
         let r#type: u16 = self.read()?;
         let class: u16 = self.read()?;
 
@@ -114,6 +101,55 @@ impl<'a> PacketBuf<'a> {
             name,
             r#type: QueryType::from(r#type),
             class,
+        })
+    }
+
+    fn record(&mut self) -> Option<DnsRecord> {
+        let mut jumps = 0;
+        let mut jumped = false;
+        let mut saved_pos = 0;
+        let mut byte: u8 = self.read()?;
+
+        let name = loop {
+            if byte ^ 0xC0 != 0x00 {
+                break self.read_label(byte)?;
+            }
+
+            // to prevent an infinite loop by a malicious packet
+            if jumps >= MAX_NAME_JUMPS {
+                return None;
+            }
+            jumps += 1;
+
+            let byte_2: u8 = self.read()?;
+            let new_pos = (((byte ^ 0xC0) as u16) << 8 | byte_2 as u16) as usize;
+
+            if !jumped {
+                jumped = true;
+                saved_pos = self.pos;
+            }
+
+            self.pos = new_pos; // reset
+            byte = self.read()?;
+        };
+
+        if jumped {
+            self.pos = saved_pos;
+        }
+
+        let r#type: u16 = self.read()?;
+        let class: u16 = self.read()?;
+        let ttl: u32 = self.read()?;
+        let len: u16 = self.read()?;
+        let ip: u32 = self.read()?;
+
+        Some(DnsRecord::A {
+            domain: name,
+            r#type: QueryType::from(r#type),
+            class,
+            ttl,
+            len,
+            ip: Ipv4Addr::from_bits(ip),
         })
     }
 }
@@ -148,6 +184,7 @@ impl FromBytes for u32 {
 struct DnsPacket {
     header: DnsHeader,
     questions: Vec<DnsQuestion>,
+    answers: Vec<DnsRecord>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -231,6 +268,19 @@ struct DnsQuestion {
     class: u16,
 }
 
+#[non_exhaustive]
+#[derive(Debug)]
+enum DnsRecord {
+    A {
+        domain: String,
+        r#type: QueryType,
+        class: u16,
+        ttl: u32,
+        len: u16,
+        ip: Ipv4Addr,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +340,20 @@ mod tests {
         assert_eq!(question.name, "google.com");
         assert_eq!(question.r#type, QueryType::A);
         assert_eq!(question.class, 1);
+
+        let DnsRecord::A {
+            domain,
+            r#type,
+            class,
+            ttl,
+            len,
+            ip,
+        } = packet_buf.record().unwrap();
+        assert_eq!(domain, "google.com");
+        assert_eq!(r#type, QueryType::A);
+        assert_eq!(class, 1);
+        assert_eq!(ttl, 150);
+        assert_eq!(len, 4);
+        assert_eq!(ip, Ipv4Addr::new(142, 250, 197, 142));
     }
 }
