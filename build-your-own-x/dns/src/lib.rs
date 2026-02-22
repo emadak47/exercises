@@ -1,185 +1,97 @@
 #[cfg(test)]
 use std::io::Read;
 use std::net::Ipv4Addr;
-use std::str;
 
 const PACKET_SIZE: usize = 512;
 const MAX_NAME_JUMPS: u8 = 10;
 
 #[derive(Debug)]
-struct PacketBuf<'a> {
+struct PacketBufReader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
-impl<'a> PacketBuf<'a> {
+impl<'a> PacketBufReader<'a> {
     fn new(buf: &'a [u8]) -> Self {
         let n = buf.len();
         assert!(0 < n && n <= PACKET_SIZE);
         Self { buf, pos: 0 }
     }
 
-    fn read_range(&mut self, start: usize, n: usize) -> Option<&[u8]> {
-        let bytes = self.buf.get(start..start + n)?;
-        self.pos += n;
-        Some(bytes)
+    fn read_u8(&mut self) -> Option<u8> {
+        let byte = *self.buf.get(self.pos)?;
+        self.pos += 1;
+        Some(byte)
     }
 
-    fn read<T: FromBytes>(&mut self) -> Option<T> {
-        T::from_bytes(self)
+    fn read_u16(&mut self) -> Option<u16> {
+        let hi = self.read_u8()? as u16;
+        let lo = self.read_u8()? as u16;
+        Some(hi << 8 | lo)
+    }
+
+    fn read_u32(&mut self) -> Option<u32> {
+        let hi = self.read_u16()? as u32;
+        let lo = self.read_u16()? as u32;
+        Some(hi << 16 | lo)
+    }
+
+    fn read_name(&mut self) -> Option<String> {
+        let mut name = String::new();
+        let mut jumps = 0;
+        let mut jumped = false;
+        let mut saved_pos = 0;
+
+        loop {
+            let byte = self.read_u8()?;
+
+            if byte & 0xC0 == 0xC0 {
+                // to prevent an infinite loop by a malicious packet
+                if jumps >= MAX_NAME_JUMPS {
+                    return None;
+                }
+                jumps += 1;
+
+                let byte_2 = self.read_u8()?;
+                let new_pos = ((byte as u16 & 0x3F) << 8 | byte_2 as u16) as usize;
+
+                if !jumped {
+                    jumped = true;
+                    saved_pos = self.pos;
+                }
+
+                self.pos = new_pos;
+                continue;
+            }
+
+            if byte == 0x00 {
+                break;
+            }
+
+            if !name.is_empty() {
+                name.push('.');
+            }
+
+            for _ in 0..byte {
+                name.push(self.read_u8()? as char);
+            }
+        }
+
+        if jumped {
+            self.pos = saved_pos;
+        }
+
+        Some(name)
     }
 
     #[cfg(test)]
     fn reset(&mut self) {
         self.pos = 0;
     }
-
-    fn header(&mut self) -> Option<DnsHeader> {
-        let id: u16 = self.read()?;
-
-        let byte: u8 = self.read()?;
-        let qr = (byte & (1 << 7)) > 0;
-        let opcode = (byte >> 3) & 0x0F;
-        let aa = (byte & (1 << 2)) > 0;
-        let tc = (byte & (1 << 1)) > 0;
-        let rd = (byte & (1 << 0)) > 0;
-
-        let byte: u8 = self.read()?;
-        let ra = (byte & 1 << 7) > 0;
-        let z = (byte & 1 << 6) > 0;
-        let ad = (byte & 1 << 5) > 0;
-        let cd = (byte & 1 << 4) > 0;
-        let rcode = RCode::from_num(byte & 0x0F);
-
-        let qdcount: u16 = self.read()?;
-        let ancount: u16 = self.read()?;
-        let nscount: u16 = self.read()?;
-        let arcount: u16 = self.read()?;
-
-        Some(DnsHeader {
-            id,
-            qr,
-            opcode,
-            aa,
-            tc,
-            rd,
-            ra,
-            z,
-            ad,
-            cd,
-            rcode,
-            qdcount,
-            ancount,
-            nscount,
-            arcount,
-        })
-    }
-
-    fn read_label(&mut self, mut byte: u8) -> Option<String> {
-        let mut name = String::new();
-
-        loop {
-            let bytes = self.read_range(self.pos, byte as usize)?;
-            name.push_str(str::from_utf8(bytes).ok()?);
-
-            byte = self.read()?;
-            if byte == 0x00 {
-                break;
-            }
-            name.push('.');
-        }
-
-        Some(name)
-    }
-
-    fn question(&mut self) -> Option<DnsQuestion> {
-        let byte: u8 = self.read()?;
-
-        let name = self.read_label(byte)?;
-        let r#type: u16 = self.read()?;
-        let class: u16 = self.read()?;
-
-        Some(DnsQuestion {
-            name,
-            r#type: QueryType::from(r#type),
-            class,
-        })
-    }
-
-    fn record(&mut self) -> Option<DnsRecord> {
-        let mut jumps = 0;
-        let mut jumped = false;
-        let mut saved_pos = 0;
-        let mut byte: u8 = self.read()?;
-
-        let name = loop {
-            if byte ^ 0xC0 != 0x00 {
-                break self.read_label(byte)?;
-            }
-
-            // to prevent an infinite loop by a malicious packet
-            if jumps >= MAX_NAME_JUMPS {
-                return None;
-            }
-            jumps += 1;
-
-            let byte_2: u8 = self.read()?;
-            let new_pos = (((byte ^ 0xC0) as u16) << 8 | byte_2 as u16) as usize;
-
-            if !jumped {
-                jumped = true;
-                saved_pos = self.pos;
-            }
-
-            self.pos = new_pos; // reset
-            byte = self.read()?;
-        };
-
-        if jumped {
-            self.pos = saved_pos;
-        }
-
-        let r#type: u16 = self.read()?;
-        let class: u16 = self.read()?;
-        let ttl: u32 = self.read()?;
-        let len: u16 = self.read()?;
-        let ip: u32 = self.read()?;
-
-        Some(DnsRecord::A {
-            domain: name,
-            r#type: QueryType::from(r#type),
-            class,
-            ttl,
-            len,
-            ip: Ipv4Addr::from_bits(ip),
-        })
-    }
 }
 
 trait FromBytes: Sized {
-    fn from_bytes(packet_buf: &mut PacketBuf) -> Option<Self>;
-}
-
-impl FromBytes for u8 {
-    fn from_bytes(packet_buf: &mut PacketBuf) -> Option<Self> {
-        let byte = *packet_buf.buf.get(packet_buf.pos)?;
-        packet_buf.pos += 1;
-        Some(byte)
-    }
-}
-
-impl FromBytes for u16 {
-    fn from_bytes(packet_buf: &mut PacketBuf) -> Option<Self> {
-        let bytes = packet_buf.read_range(packet_buf.pos, 2)?.try_into().ok()?;
-        Some(u16::from_be_bytes(bytes))
-    }
-}
-
-impl FromBytes for u32 {
-    fn from_bytes(packet_buf: &mut PacketBuf) -> Option<Self> {
-        let bytes = packet_buf.read_range(packet_buf.pos, 4)?.try_into().ok()?;
-        Some(u32::from_be_bytes(bytes))
-    }
+    fn from_bytes(reader: &mut PacketBufReader) -> Option<Self>;
 }
 
 #[derive(Debug)]
@@ -249,28 +161,28 @@ struct DnsPacket {
 
 impl DnsPacket {
     fn from_bytes(buf: &[u8]) -> Option<Self> {
-        let mut packet_buf = PacketBuf::new(buf);
+        let mut reader = PacketBufReader::new(buf);
 
-        let header = packet_buf.header()?;
+        let header = DnsHeader::from_bytes(&mut reader)?;
 
         let mut questions = Vec::with_capacity(header.qdcount as usize);
         for _ in 0..header.qdcount {
-            questions.push(packet_buf.question()?);
+            questions.push(DnsQuestion::from_bytes(&mut reader)?);
         }
 
         let mut answers = Vec::with_capacity(header.ancount as usize);
         for _ in 0..header.ancount {
-            answers.push(packet_buf.record()?);
+            answers.push(DnsRecord::from_bytes(&mut reader)?);
         }
 
         let mut authorities = Vec::with_capacity(header.nscount as usize);
         for _ in 0..header.nscount {
-            authorities.push(packet_buf.record()?);
+            authorities.push(DnsRecord::from_bytes(&mut reader)?);
         }
 
         let mut resources = Vec::with_capacity(header.arcount as usize);
         for _ in 0..header.arcount {
-            resources.push(packet_buf.record()?);
+            resources.push(DnsRecord::from_bytes(&mut reader)?);
         }
 
         Some(DnsPacket {
@@ -375,6 +287,49 @@ struct DnsHeader {
     arcount: u16,
 }
 
+impl FromBytes for DnsHeader {
+    fn from_bytes(reader: &mut PacketBufReader) -> Option<Self> {
+        let id = reader.read_u16()?;
+
+        let byte = reader.read_u8()?;
+        let qr = (byte & (1 << 7)) > 0;
+        let opcode = (byte >> 3) & 0x0F;
+        let aa = (byte & (1 << 2)) > 0;
+        let tc = (byte & (1 << 1)) > 0;
+        let rd = (byte & 1) > 0;
+
+        let byte = reader.read_u8()?;
+        let ra = (byte & (1 << 7)) > 0;
+        let z = (byte & (1 << 6)) > 0;
+        let ad = (byte & (1 << 5)) > 0;
+        let cd = (byte & (1 << 4)) > 0;
+        let rcode = RCode::from_num(byte & 0x0F);
+
+        let qdcount = reader.read_u16()?;
+        let ancount = reader.read_u16()?;
+        let nscount = reader.read_u16()?;
+        let arcount = reader.read_u16()?;
+
+        Some(DnsHeader {
+            id,
+            qr,
+            opcode,
+            aa,
+            tc,
+            rd,
+            ra,
+            z,
+            ad,
+            cd,
+            rcode,
+            qdcount,
+            ancount,
+            nscount,
+            arcount,
+        })
+    }
+}
+
 impl ToBytes for DnsHeader {
     fn to_bytes(&self, writer: &mut PacketBufWriter) -> Option<()> {
         writer.write_u16(self.id)?;
@@ -430,6 +385,40 @@ struct DnsQuestion {
     name: String,
     r#type: QueryType,
     class: u16,
+}
+
+impl FromBytes for DnsQuestion {
+    fn from_bytes(reader: &mut PacketBufReader) -> Option<Self> {
+        let name = reader.read_name()?;
+        let r#type = QueryType::from(reader.read_u16()?);
+        let class = reader.read_u16()?;
+
+        Some(DnsQuestion {
+            name,
+            r#type,
+            class,
+        })
+    }
+}
+
+impl FromBytes for DnsRecord {
+    fn from_bytes(reader: &mut PacketBufReader) -> Option<Self> {
+        let domain = reader.read_name()?;
+        let r#type = QueryType::from(reader.read_u16()?);
+        let class = reader.read_u16()?;
+        let ttl = reader.read_u32()?;
+        let len = reader.read_u16()?;
+        let ip = Ipv4Addr::from_bits(reader.read_u32()?);
+
+        Some(DnsRecord::A {
+            domain,
+            r#type,
+            class,
+            ttl,
+            len,
+            ip,
+        })
+    }
 }
 
 impl ToBytes for DnsQuestion {
@@ -488,17 +477,17 @@ mod tests {
     #[test]
     fn from_raw_bytes() {
         let bytes = [155, 81, 129, 128];
-        let mut packet_buf = PacketBuf::new(&bytes[..]);
+        let mut reader = PacketBufReader::new(&bytes[..]);
 
-        let one: u8 = packet_buf.read().unwrap();
+        let one = reader.read_u8().unwrap();
         assert_eq!(one, 155);
-        packet_buf.reset();
+        reader.reset();
 
-        let two: u16 = packet_buf.read().unwrap();
+        let two = reader.read_u16().unwrap();
         assert_eq!(two, 155 << 8 | 81);
-        packet_buf.reset();
+        reader.reset();
 
-        let three: u32 = packet_buf.read().unwrap();
+        let three = reader.read_u32().unwrap();
         assert_eq!(three, 155 << 24 | 81 << 16 | 129 << 8 | 128);
     }
 
