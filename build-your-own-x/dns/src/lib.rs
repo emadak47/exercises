@@ -473,6 +473,7 @@ mod tests {
 
     use std::fs::File;
     use std::io::BufReader;
+    use std::net::UdpSocket;
 
     #[test]
     fn from_raw_bytes() {
@@ -557,5 +558,76 @@ mod tests {
         assert!(packet.answers.is_empty());
         assert!(packet.authorities.is_empty());
         assert!(packet.resources.is_empty());
+    }
+
+    #[test]
+    #[ignore]
+    fn stub_resolver() {
+        let query = DnsPacket {
+            header: DnsHeader {
+                id: 6666,
+                qr: false,
+                opcode: 0,
+                aa: false,
+                tc: false,
+                rd: true,
+                ra: false,
+                z: false,
+                ad: false,
+                cd: false,
+                rcode: RCode::Noerror,
+                qdcount: 1,
+                ancount: 0,
+                nscount: 0,
+                arcount: 0,
+            },
+            questions: vec![DnsQuestion {
+                name: "google.com".to_string(),
+                r#type: QueryType::A,
+                class: 1,
+            }],
+            answers: vec![],
+            authorities: vec![],
+            resources: vec![],
+        };
+
+        let mut req_buf = [0u8; PACKET_SIZE];
+        query.to_bytes(&mut req_buf).unwrap();
+
+        // send to google's public DNS server
+        let socket = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+        socket.send_to(&req_buf, ("8.8.8.8", 53)).unwrap();
+
+        let mut res_buf = [0u8; PACKET_SIZE];
+        socket.recv_from(&mut res_buf).unwrap();
+
+        let response = DnsPacket::from_bytes(&res_buf).unwrap();
+
+        assert_eq!(response.header.id, 6666);
+        assert!(response.header.qr);
+        assert_eq!(response.header.opcode, 0);
+        assert!(response.header.rd);
+        assert!(response.header.ra);
+        assert_eq!(response.header.rcode, RCode::Noerror);
+        assert_eq!(response.header.qdcount, 1);
+        assert!(response.header.ancount >= 1);
+
+        assert_eq!(response.questions.len(), 1);
+        assert_eq!(response.questions[0].name, "google.com");
+        assert_eq!(response.questions[0].r#type, QueryType::A);
+        assert_eq!(response.questions[0].class, 1);
+
+        assert!(!response.answers.is_empty());
+        let DnsRecord::A {
+            ref domain,
+            r#type,
+            class,
+            ..
+        } = response.answers[0];
+        assert_eq!(domain, "google.com");
+        assert_eq!(r#type, QueryType::A);
+        assert_eq!(class, 1);
+
+        println!("{:#?}", response);
     }
 }
