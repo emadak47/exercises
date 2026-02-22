@@ -183,6 +183,62 @@ impl FromBytes for u32 {
 }
 
 #[derive(Debug)]
+struct PacketBufWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> PacketBufWriter<'a> {
+    fn new(buf: &'a mut [u8]) -> Self {
+        let n = buf.len();
+        assert!(0 < n && n <= PACKET_SIZE);
+        Self { buf, pos: 0 }
+    }
+
+    fn write_u8(&mut self, val: u8) -> Option<()> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        self.buf[self.pos] = val;
+        self.pos += 1;
+        Some(())
+    }
+
+    fn write_u16(&mut self, val: u16) -> Option<()> {
+        self.write_u8((val >> 8) as u8)?;
+        self.write_u8((val & 0xFF) as u8)?;
+        Some(())
+    }
+
+    fn write_u32(&mut self, val: u32) -> Option<()> {
+        self.write_u8((val >> 24) as u8)?;
+        self.write_u8((val >> 16 & 0xFF) as u8)?;
+        self.write_u8((val >> 8 & 0xFF) as u8)?;
+        self.write_u8((val & 0xFF) as u8)?;
+        Some(())
+    }
+
+    fn write_name(&mut self, name: &str) -> Option<()> {
+        for label in name.split('.') {
+            let len = label.len();
+            if len > 63 {
+                return None;
+            }
+            self.write_u8(len as u8)?;
+            for b in label.as_bytes() {
+                self.write_u8(*b)?;
+            }
+        }
+        self.write_u8(0)?;
+        Some(())
+    }
+}
+
+trait ToBytes {
+    fn to_bytes(&self, writer: &mut PacketBufWriter) -> Option<()>;
+}
+
+#[derive(Debug)]
 struct DnsPacket {
     header: DnsHeader,
     questions: Vec<DnsQuestion>,
@@ -226,6 +282,32 @@ impl DnsPacket {
         })
     }
 
+    fn to_bytes(&self, buf: &mut [u8]) -> Option<()> {
+        assert_eq!(buf.len(), PACKET_SIZE);
+
+        let mut temp = [0u8; PACKET_SIZE]; // to keep buf untouched on midway failures
+        let mut writer = PacketBufWriter::new(&mut temp);
+
+        self.header.to_bytes(&mut writer)?;
+
+        for q in &self.questions {
+            q.to_bytes(&mut writer)?;
+        }
+        for ans in &self.answers {
+            ans.to_bytes(&mut writer)?;
+        }
+        for auth in &self.authorities {
+            auth.to_bytes(&mut writer)?;
+        }
+        for r in &self.resources {
+            r.to_bytes(&mut writer)?;
+        }
+
+        buf.copy_from_slice(&temp);
+
+        Some(())
+    }
+
     #[cfg(test)]
     fn from_reader<R: Read>(mut reader: R) -> Option<Self> {
         let mut buf = Vec::new();
@@ -234,7 +316,7 @@ impl DnsPacket {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum RCode {
     Noerror = 0,
     Formerr = 1,
@@ -293,8 +375,35 @@ struct DnsHeader {
     arcount: u16,
 }
 
+impl ToBytes for DnsHeader {
+    fn to_bytes(&self, writer: &mut PacketBufWriter) -> Option<()> {
+        writer.write_u16(self.id)?;
+
+        let byte: u8 = (self.qr as u8) << 7
+            | self.opcode << 3
+            | (self.aa as u8) << 2
+            | (self.tc as u8) << 1
+            | self.rd as u8;
+        writer.write_u8(byte)?;
+
+        let byte: u8 = (self.ra as u8) << 7
+            | (self.z as u8) << 6
+            | (self.ad as u8) << 5
+            | (self.cd as u8) << 4
+            | self.rcode as u8;
+        writer.write_u8(byte)?;
+
+        writer.write_u16(self.qdcount)?;
+        writer.write_u16(self.ancount)?;
+        writer.write_u16(self.nscount)?;
+        writer.write_u16(self.arcount)?;
+
+        Some(())
+    }
+}
+
 #[non_exhaustive]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum QueryType {
     A,
 }
@@ -308,11 +417,28 @@ impl From<u16> for QueryType {
     }
 }
 
+impl From<QueryType> for u16 {
+    fn from(value: QueryType) -> Self {
+        match value {
+            QueryType::A => 1,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct DnsQuestion {
     name: String,
     r#type: QueryType,
     class: u16,
+}
+
+impl ToBytes for DnsQuestion {
+    fn to_bytes(&self, writer: &mut PacketBufWriter) -> Option<()> {
+        writer.write_name(&self.name)?;
+        writer.write_u16(self.r#type.into())?;
+        writer.write_u16(self.class)?;
+        Some(())
+    }
 }
 
 #[non_exhaustive]
@@ -326,6 +452,30 @@ enum DnsRecord {
         len: u16,
         ip: Ipv4Addr,
     },
+}
+
+impl ToBytes for DnsRecord {
+    fn to_bytes(&self, writer: &mut PacketBufWriter) -> Option<()> {
+        match self {
+            Self::A {
+                domain,
+                r#type,
+                class,
+                ttl,
+                len,
+                ip,
+            } => {
+                writer.write_name(domain)?;
+                writer.write_u16((*r#type).into())?;
+                writer.write_u16(*class)?;
+                writer.write_u32(*ttl)?;
+                writer.write_u16(*len)?;
+                writer.write_u32(ip.to_bits())?;
+            }
+        }
+
+        Some(())
+    }
 }
 
 #[cfg(test)]
