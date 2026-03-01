@@ -441,51 +441,30 @@ impl ToBytes for DnsQuestion {
     }
 }
 
+fn wire_name_len(name: &str) -> u16 {
+    // sum of each label's length + 1 byte per label for the length prefix
+    // + 1 for the terminator
+    (name.split('.').map(|l| l.len() + 1).sum::<usize>() + 1) as u16
+}
+
+#[derive(Debug)]
+struct DnsRecord {
+    domain: String,
+    r#type: QueryType,
+    class: u16,
+    ttl: u32,
+    rdata: RData,
+}
+
 #[non_exhaustive]
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug)]
-enum DnsRecord {
-    A {
-        domain: String,
-        r#type: QueryType,
-        class: u16,
-        ttl: u32,
-        len: u16,
-        ip: Ipv4Addr,
-    },
-    NS {
-        domain: String,
-        r#type: QueryType,
-        class: u16,
-        ttl: u32,
-        len: u16,
-        host: String,
-    },
-    CNAME {
-        domain: String,
-        r#type: QueryType,
-        class: u16,
-        ttl: u32,
-        len: u16,
-        host: String,
-    },
-    MX {
-        domain: String,
-        r#type: QueryType,
-        class: u16,
-        ttl: u32,
-        len: u16,
-        priority: u16,
-        host: String,
-    },
-    AAAA {
-        domain: String,
-        r#type: QueryType,
-        class: u16,
-        ttl: u32,
-        len: u16,
-        ip: Ipv6Addr,
-    },
+enum RData {
+    A { ip: Ipv4Addr },
+    NS { host: String },
+    CNAME { host: String },
+    MX { priority: u16, host: String },
+    AAAA { ip: Ipv6Addr },
 }
 
 impl FromBytes for DnsRecord {
@@ -494,150 +473,60 @@ impl FromBytes for DnsRecord {
         let r#type = QueryType::from(reader.read_u16()?);
         let class = reader.read_u16()?;
         let ttl = reader.read_u32()?;
-        let len = reader.read_u16()?;
+        let _len = reader.read_u16()?;
 
-        Some(match r#type {
-            QueryType::A => {
-                let ip = Ipv4Addr::from_bits(reader.read_u32()?);
-                DnsRecord::A {
-                    domain,
-                    r#type,
-                    class,
-                    ttl,
-                    len,
-                    ip,
-                }
-            }
-            QueryType::NS => {
-                let host = reader.read_name()?;
-                DnsRecord::NS {
-                    domain,
-                    r#type,
-                    class,
-                    ttl,
-                    len,
-                    host,
-                }
-            }
-            QueryType::CNAME => {
-                let host = reader.read_name()?;
-                DnsRecord::CNAME {
-                    domain,
-                    r#type,
-                    class,
-                    ttl,
-                    len,
-                    host,
-                }
-            }
-            QueryType::MX => {
-                let priority = reader.read_u16()?;
-                let host = reader.read_name()?;
-                DnsRecord::MX {
-                    domain,
-                    r#type,
-                    class,
-                    ttl,
-                    len,
-                    priority,
-                    host,
-                }
-            }
-            QueryType::AAAA => {
-                let ip = Ipv6Addr::from_bits(reader.read_u128()?);
-                DnsRecord::AAAA {
-                    domain,
-                    r#type,
-                    class,
-                    ttl,
-                    len,
-                    ip,
-                }
-            }
+        let rdata = match r#type {
+            QueryType::A => RData::A {
+                ip: Ipv4Addr::from_bits(reader.read_u32()?),
+            },
+            QueryType::NS => RData::NS {
+                host: reader.read_name()?,
+            },
+            QueryType::CNAME => RData::CNAME {
+                host: reader.read_name()?,
+            },
+            QueryType::MX => RData::MX {
+                priority: reader.read_u16()?,
+                host: reader.read_name()?,
+            },
+            QueryType::AAAA => RData::AAAA {
+                ip: Ipv6Addr::from_bits(reader.read_u128()?),
+            },
+        };
+
+        Some(DnsRecord {
+            domain,
+            r#type,
+            class,
+            ttl,
+            rdata,
         })
     }
 }
 
 impl ToBytes for DnsRecord {
     fn to_bytes(&self, writer: &mut PacketBufWriter) -> Option<()> {
-        match self {
-            Self::A {
-                domain,
-                r#type,
-                class,
-                ttl,
-                len,
-                ip,
-            } => {
-                writer.write_name(domain)?;
-                writer.write_u16((*r#type).into())?;
-                writer.write_u16(*class)?;
-                writer.write_u32(*ttl)?;
-                writer.write_u16(*len)?;
-                writer.write_u32(ip.to_bits())?;
-            }
-            Self::NS {
-                domain,
-                r#type,
-                class,
-                ttl,
-                len,
-                host,
-            } => {
-                writer.write_name(domain)?;
-                writer.write_u16((*r#type).into())?;
-                writer.write_u16(*class)?;
-                writer.write_u32(*ttl)?;
-                writer.write_u16(*len)?;
-                writer.write_name(host)?;
-            }
-            Self::CNAME {
-                domain,
-                r#type,
-                class,
-                ttl,
-                len,
-                host,
-            } => {
-                writer.write_name(domain)?;
-                writer.write_u16((*r#type).into())?;
-                writer.write_u16(*class)?;
-                writer.write_u32(*ttl)?;
-                writer.write_u16(*len)?;
-                writer.write_name(host)?;
-            }
-            Self::MX {
-                domain,
-                r#type,
-                class,
-                ttl,
-                len,
-                priority,
-                host,
-            } => {
-                writer.write_name(domain)?;
-                writer.write_u16((*r#type).into())?;
-                writer.write_u16(*class)?;
-                writer.write_u32(*ttl)?;
-                writer.write_u16(*len)?;
+        writer.write_name(&self.domain)?;
+        writer.write_u16(self.r#type.into())?;
+        writer.write_u16(self.class)?;
+        writer.write_u32(self.ttl)?;
+
+        let rdlen = match &self.rdata {
+            RData::A { .. } => 4,     // Ipv4addr
+            RData::AAAA { .. } => 16, // Ipv6addr
+            RData::NS { host } | RData::CNAME { host } => wire_name_len(host),
+            RData::MX { host, .. } => 2 + wire_name_len(host), // priority + host
+        };
+        writer.write_u16(rdlen)?;
+
+        match &self.rdata {
+            RData::A { ip } => writer.write_u32(ip.to_bits())?,
+            RData::NS { host } | RData::CNAME { host } => writer.write_name(host)?,
+            RData::MX { priority, host } => {
                 writer.write_u16(*priority)?;
                 writer.write_name(host)?;
             }
-            Self::AAAA {
-                domain,
-                r#type,
-                class,
-                ttl,
-                len,
-                ip,
-            } => {
-                writer.write_name(domain)?;
-                writer.write_u16((*r#type).into())?;
-                writer.write_u16(*class)?;
-                writer.write_u32(*ttl)?;
-                writer.write_u16(*len)?;
-                writer.write_u128(ip.to_bits())?;
-            }
+            RData::AAAA { ip } => writer.write_u128(ip.to_bits())?,
         }
 
         Some(())
@@ -651,6 +540,47 @@ mod tests {
     use std::fs::File;
     use std::io::BufReader;
     use std::net::UdpSocket;
+
+    fn query(name: &str, qtype: QueryType) -> DnsPacket {
+        let query = DnsPacket {
+            header: DnsHeader {
+                id: 6666,
+                qr: false,
+                opcode: 0,
+                aa: false,
+                tc: false,
+                rd: true,
+                ra: false,
+                z: false,
+                ad: false,
+                cd: false,
+                rcode: RCode::Noerror,
+                qdcount: 1,
+                ancount: 0,
+                nscount: 0,
+                arcount: 0,
+            },
+            questions: vec![DnsQuestion {
+                name: name.to_string(),
+                r#type: qtype,
+                class: 1,
+            }],
+            answers: vec![],
+            authorities: vec![],
+            resources: vec![],
+        };
+
+        let mut req_buf = [0u8; PACKET_SIZE];
+        query.to_bytes(&mut req_buf).unwrap();
+
+        let socket = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+        socket.send_to(&req_buf, ("8.8.8.8", 53)).unwrap();
+
+        let mut res_buf = [0u8; PACKET_SIZE];
+        socket.recv_from(&mut res_buf).unwrap();
+
+        DnsPacket::from_bytes(&res_buf).unwrap()
+    }
 
     #[test]
     fn from_raw_bytes() {
@@ -696,22 +626,14 @@ mod tests {
         assert_eq!(q.r#type, QueryType::A);
         assert_eq!(q.class, 1);
 
-        let DnsRecord::A {
-            domain,
-            r#type,
-            class,
-            ttl,
-            len,
-            ip,
-        } = &packet.answers[0]
-        else {
+        let rec = &packet.answers[0];
+        assert_eq!(rec.domain, "google.com");
+        assert_eq!(rec.r#type, QueryType::A);
+        assert_eq!(rec.class, 1);
+        assert_eq!(rec.ttl, 150);
+        let RData::A { ip } = &rec.rdata else {
             panic!("not A record")
         };
-        assert_eq!(domain, "google.com");
-        assert_eq!(*r#type, QueryType::A);
-        assert_eq!(*class, 1);
-        assert_eq!(*ttl, 150);
-        assert_eq!(*len, 4);
         assert_eq!(*ip, Ipv4Addr::new(142, 250, 197, 142));
 
         assert!(packet.authorities.is_empty());
@@ -743,45 +665,7 @@ mod tests {
     #[test]
     #[ignore]
     fn stub_resolver() {
-        let query = DnsPacket {
-            header: DnsHeader {
-                id: 6666,
-                qr: false,
-                opcode: 0,
-                aa: false,
-                tc: false,
-                rd: true,
-                ra: false,
-                z: false,
-                ad: false,
-                cd: false,
-                rcode: RCode::Noerror,
-                qdcount: 1,
-                ancount: 0,
-                nscount: 0,
-                arcount: 0,
-            },
-            questions: vec![DnsQuestion {
-                name: "google.com".to_string(),
-                r#type: QueryType::A,
-                class: 1,
-            }],
-            answers: vec![],
-            authorities: vec![],
-            resources: vec![],
-        };
-
-        let mut req_buf = [0u8; PACKET_SIZE];
-        query.to_bytes(&mut req_buf).unwrap();
-
-        // send to google's public DNS server
-        let socket = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
-        socket.send_to(&req_buf, ("8.8.8.8", 53)).unwrap();
-
-        let mut res_buf = [0u8; PACKET_SIZE];
-        socket.recv_from(&mut res_buf).unwrap();
-
-        let response = DnsPacket::from_bytes(&res_buf).unwrap();
+        let response = query("google.com", QueryType::A);
 
         assert_eq!(response.header.id, 6666);
         assert!(response.header.qr);
@@ -798,18 +682,70 @@ mod tests {
         assert_eq!(response.questions[0].class, 1);
 
         assert!(!response.answers.is_empty());
-        let DnsRecord::A {
-            ref domain,
-            r#type,
-            class,
-            ..
-        } = response.answers[0]
-        else {
-            panic!("not A record")
+        let rec = &response.answers[0];
+        assert_eq!(rec.domain, "google.com");
+        assert_eq!(rec.r#type, QueryType::A);
+        assert_eq!(rec.class, 1);
+
+        println!("{:#?}", response);
+    }
+
+    #[test]
+    #[ignore]
+    fn lookup_yahoo_a() {
+        let response = query("www.yahoo.com", QueryType::A);
+
+        assert_eq!(response.header.rcode, RCode::Noerror);
+        assert!(response.header.ancount >= 2);
+
+        // First answer should be a CNAME pointing away from www.yahoo.com
+        let first = &response.answers[0];
+        assert_eq!(first.domain, "www.yahoo.com");
+        assert!(matches!(first.rdata, RData::CNAME { .. }));
+
+        // Remaining answers should be A records
+        for rec in &response.answers[1..] {
+            assert!(matches!(rec.rdata, RData::A { .. }));
+        }
+
+        println!("{:#?}", response);
+    }
+
+    #[test]
+    #[ignore]
+    fn lookup_yahoo_mx() {
+        let response = query("yahoo.com", QueryType::MX);
+
+        assert_eq!(response.header.rcode, RCode::Noerror);
+        assert!(response.header.ancount >= 1);
+
+        for rec in &response.answers {
+            assert_eq!(rec.r#type, QueryType::MX);
+            let RData::MX { priority, host } = &rec.rdata else {
+                panic!("expected MX record");
+            };
+            assert!(*priority > 0);
+            assert!(!host.is_empty());
+        }
+
+        println!("{:#?}", response);
+    }
+
+    #[test]
+    #[ignore]
+    fn lookup_google_aaaa() {
+        let response = query("google.com", QueryType::AAAA);
+
+        assert_eq!(response.header.rcode, RCode::Noerror);
+        assert!(response.header.ancount >= 1);
+
+        let rec = &response.answers[0];
+        assert_eq!(rec.domain, "google.com");
+        assert_eq!(rec.r#type, QueryType::AAAA);
+        let RData::AAAA { ip } = &rec.rdata else {
+            panic!("expected AAAA record");
         };
-        assert_eq!(domain, "google.com");
-        assert_eq!(r#type, QueryType::A);
-        assert_eq!(class, 1);
+        assert!(ip.to_string().contains(':'));
 
         println!("{:#?}", response);
     }
