@@ -401,26 +401,6 @@ impl FromBytes for DnsQuestion {
     }
 }
 
-impl FromBytes for DnsRecord {
-    fn from_bytes(reader: &mut PacketBufReader) -> Option<Self> {
-        let domain = reader.read_name()?;
-        let r#type = QueryType::from(reader.read_u16()?);
-        let class = reader.read_u16()?;
-        let ttl = reader.read_u32()?;
-        let len = reader.read_u16()?;
-        let ip = Ipv4Addr::from_bits(reader.read_u32()?);
-
-        Some(DnsRecord::A {
-            domain,
-            r#type,
-            class,
-            ttl,
-            len,
-            ip,
-        })
-    }
-}
-
 impl ToBytes for DnsQuestion {
     fn to_bytes(&self, writer: &mut PacketBufWriter) -> Option<()> {
         writer.write_name(&self.name)?;
@@ -441,6 +421,26 @@ enum DnsRecord {
         len: u16,
         ip: Ipv4Addr,
     },
+}
+
+impl FromBytes for DnsRecord {
+    fn from_bytes(reader: &mut PacketBufReader) -> Option<Self> {
+        let domain = reader.read_name()?;
+        let r#type = QueryType::from(reader.read_u16()?);
+        let class = reader.read_u16()?;
+        let ttl = reader.read_u32()?;
+        let len = reader.read_u16()?;
+        let ip = Ipv4Addr::from_bits(reader.read_u32()?);
+
+        Some(DnsRecord::A {
+            domain,
+            r#type,
+            class,
+            ttl,
+            len,
+            ip,
+        })
+    }
 }
 
 impl ToBytes for DnsRecord {
