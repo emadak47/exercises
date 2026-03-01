@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 #[cfg(test)]
 use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -374,6 +376,7 @@ impl ToBytes for DnsHeader {
 }
 
 #[non_exhaustive]
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum QueryType {
     A,
@@ -439,6 +442,7 @@ impl ToBytes for DnsQuestion {
 }
 
 #[non_exhaustive]
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug)]
 enum DnsRecord {
     A {
