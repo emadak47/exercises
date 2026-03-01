@@ -1,6 +1,6 @@
 #[cfg(test)]
 use std::io::Read;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 const PACKET_SIZE: usize = 512;
 const MAX_NAME_JUMPS: u8 = 10;
@@ -34,6 +34,14 @@ impl<'a> PacketBufReader<'a> {
         let hi = self.read_u16()? as u32;
         let lo = self.read_u16()? as u32;
         Some(hi << 16 | lo)
+    }
+
+    fn read_u128(&mut self) -> Option<u128> {
+        let a = self.read_u32()? as u128;
+        let b = self.read_u32()? as u128;
+        let c = self.read_u32()? as u128;
+        let d = self.read_u32()? as u128;
+        Some(a << 96 | b << 64 | c << 32 | d)
     }
 
     fn read_name(&mut self) -> Option<String> {
@@ -127,6 +135,14 @@ impl<'a> PacketBufWriter<'a> {
         self.write_u8((val >> 16 & 0xFF) as u8)?;
         self.write_u8((val >> 8 & 0xFF) as u8)?;
         self.write_u8((val & 0xFF) as u8)?;
+        Some(())
+    }
+
+    fn write_u128(&mut self, val: u128) -> Option<()> {
+        self.write_u32((val >> 96) as u32)?;
+        self.write_u32((val >> 64) as u32)?;
+        self.write_u32((val >> 32) as u32)?;
+        self.write_u32(val as u32)?;
         Some(())
     }
 
@@ -361,12 +377,20 @@ impl ToBytes for DnsHeader {
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum QueryType {
     A,
+    NS,
+    CNAME,
+    MX,
+    AAAA,
 }
 
 impl From<u16> for QueryType {
     fn from(value: u16) -> Self {
         match value {
             1 => QueryType::A,
+            2 => QueryType::NS,
+            5 => QueryType::CNAME,
+            15 => QueryType::MX,
+            28 => QueryType::AAAA,
             _ => unimplemented!(),
         }
     }
@@ -376,6 +400,10 @@ impl From<QueryType> for u16 {
     fn from(value: QueryType) -> Self {
         match value {
             QueryType::A => 1,
+            QueryType::NS => 2,
+            QueryType::CNAME => 5,
+            QueryType::MX => 15,
+            QueryType::AAAA => 28,
         }
     }
 }
@@ -421,6 +449,39 @@ enum DnsRecord {
         len: u16,
         ip: Ipv4Addr,
     },
+    NS {
+        domain: String,
+        r#type: QueryType,
+        class: u16,
+        ttl: u32,
+        len: u16,
+        host: String,
+    },
+    CNAME {
+        domain: String,
+        r#type: QueryType,
+        class: u16,
+        ttl: u32,
+        len: u16,
+        host: String,
+    },
+    MX {
+        domain: String,
+        r#type: QueryType,
+        class: u16,
+        ttl: u32,
+        len: u16,
+        priority: u16,
+        host: String,
+    },
+    AAAA {
+        domain: String,
+        r#type: QueryType,
+        class: u16,
+        ttl: u32,
+        len: u16,
+        ip: Ipv6Addr,
+    },
 }
 
 impl FromBytes for DnsRecord {
@@ -430,15 +491,65 @@ impl FromBytes for DnsRecord {
         let class = reader.read_u16()?;
         let ttl = reader.read_u32()?;
         let len = reader.read_u16()?;
-        let ip = Ipv4Addr::from_bits(reader.read_u32()?);
 
-        Some(DnsRecord::A {
-            domain,
-            r#type,
-            class,
-            ttl,
-            len,
-            ip,
+        Some(match r#type {
+            QueryType::A => {
+                let ip = Ipv4Addr::from_bits(reader.read_u32()?);
+                DnsRecord::A {
+                    domain,
+                    r#type,
+                    class,
+                    ttl,
+                    len,
+                    ip,
+                }
+            }
+            QueryType::NS => {
+                let host = reader.read_name()?;
+                DnsRecord::NS {
+                    domain,
+                    r#type,
+                    class,
+                    ttl,
+                    len,
+                    host,
+                }
+            }
+            QueryType::CNAME => {
+                let host = reader.read_name()?;
+                DnsRecord::CNAME {
+                    domain,
+                    r#type,
+                    class,
+                    ttl,
+                    len,
+                    host,
+                }
+            }
+            QueryType::MX => {
+                let priority = reader.read_u16()?;
+                let host = reader.read_name()?;
+                DnsRecord::MX {
+                    domain,
+                    r#type,
+                    class,
+                    ttl,
+                    len,
+                    priority,
+                    host,
+                }
+            }
+            QueryType::AAAA => {
+                let ip = Ipv6Addr::from_bits(reader.read_u128()?);
+                DnsRecord::AAAA {
+                    domain,
+                    r#type,
+                    class,
+                    ttl,
+                    len,
+                    ip,
+                }
+            }
         })
     }
 }
@@ -460,6 +571,68 @@ impl ToBytes for DnsRecord {
                 writer.write_u32(*ttl)?;
                 writer.write_u16(*len)?;
                 writer.write_u32(ip.to_bits())?;
+            }
+            Self::NS {
+                domain,
+                r#type,
+                class,
+                ttl,
+                len,
+                host,
+            } => {
+                writer.write_name(domain)?;
+                writer.write_u16((*r#type).into())?;
+                writer.write_u16(*class)?;
+                writer.write_u32(*ttl)?;
+                writer.write_u16(*len)?;
+                writer.write_name(host)?;
+            }
+            Self::CNAME {
+                domain,
+                r#type,
+                class,
+                ttl,
+                len,
+                host,
+            } => {
+                writer.write_name(domain)?;
+                writer.write_u16((*r#type).into())?;
+                writer.write_u16(*class)?;
+                writer.write_u32(*ttl)?;
+                writer.write_u16(*len)?;
+                writer.write_name(host)?;
+            }
+            Self::MX {
+                domain,
+                r#type,
+                class,
+                ttl,
+                len,
+                priority,
+                host,
+            } => {
+                writer.write_name(domain)?;
+                writer.write_u16((*r#type).into())?;
+                writer.write_u16(*class)?;
+                writer.write_u32(*ttl)?;
+                writer.write_u16(*len)?;
+                writer.write_u16(*priority)?;
+                writer.write_name(host)?;
+            }
+            Self::AAAA {
+                domain,
+                r#type,
+                class,
+                ttl,
+                len,
+                ip,
+            } => {
+                writer.write_name(domain)?;
+                writer.write_u16((*r#type).into())?;
+                writer.write_u16(*class)?;
+                writer.write_u32(*ttl)?;
+                writer.write_u16(*len)?;
+                writer.write_u128(ip.to_bits())?;
             }
         }
 
@@ -526,7 +699,10 @@ mod tests {
             ttl,
             len,
             ip,
-        } = &packet.answers[0];
+        } = &packet.answers[0]
+        else {
+            panic!("not A record")
+        };
         assert_eq!(domain, "google.com");
         assert_eq!(*r#type, QueryType::A);
         assert_eq!(*class, 1);
@@ -623,7 +799,10 @@ mod tests {
             r#type,
             class,
             ..
-        } = response.answers[0];
+        } = response.answers[0]
+        else {
+            panic!("not A record")
+        };
         assert_eq!(domain, "google.com");
         assert_eq!(r#type, QueryType::A);
         assert_eq!(class, 1);
