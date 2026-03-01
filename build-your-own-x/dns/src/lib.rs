@@ -1,10 +1,11 @@
 #![allow(unused)]
 
+use std::io;
 #[cfg(test)]
 use std::io::Read;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, ToSocketAddrs, UdpSocket};
 
-const PACKET_SIZE: usize = 512;
+pub const PACKET_SIZE: usize = 512;
 const MAX_NAME_JUMPS: u8 = 10;
 
 #[derive(Debug)]
@@ -169,16 +170,42 @@ trait ToBytes {
 }
 
 #[derive(Debug)]
-struct DnsPacket {
-    header: DnsHeader,
-    questions: Vec<DnsQuestion>,
-    answers: Vec<DnsRecord>,
-    authorities: Vec<DnsRecord>,
-    resources: Vec<DnsRecord>,
+pub struct DnsPacket {
+    pub header: DnsHeader,
+    pub questions: Vec<DnsQuestion>,
+    pub answers: Vec<DnsRecord>,
+    pub authorities: Vec<DnsRecord>,
+    pub resources: Vec<DnsRecord>,
 }
 
 impl DnsPacket {
-    fn from_bytes(buf: &[u8]) -> Option<Self> {
+    pub fn new_empty() -> Self {
+        Self {
+            header: DnsHeader {
+                id: 0,
+                qr: false,
+                opcode: 0,
+                aa: false,
+                tc: false,
+                rd: false,
+                ra: false,
+                z: false,
+                ad: false,
+                cd: false,
+                rcode: RCode::Noerror,
+                qdcount: 0,
+                ancount: 0,
+                nscount: 0,
+                arcount: 0,
+            },
+            questions: vec![],
+            answers: vec![],
+            authorities: vec![],
+            resources: vec![],
+        }
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
         let mut reader = PacketBufReader::new(buf);
 
         let header = DnsHeader::from_bytes(&mut reader)?;
@@ -212,7 +239,7 @@ impl DnsPacket {
         })
     }
 
-    fn to_bytes(&self, buf: &mut [u8]) -> Option<()> {
+    pub fn to_bytes(&self, buf: &mut [u8]) -> Option<()> {
         assert_eq!(buf.len(), PACKET_SIZE);
 
         let mut temp = [0u8; PACKET_SIZE]; // to keep buf untouched on midway failures
@@ -247,7 +274,7 @@ impl DnsPacket {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum RCode {
+pub enum RCode {
     Noerror = 0,
     Formerr = 1,
     Servfail = 2,
@@ -270,39 +297,39 @@ impl RCode {
 }
 
 #[derive(Debug)]
-struct DnsHeader {
-    id: u16,
+pub struct DnsHeader {
+    pub id: u16,
 
     // query response
-    qr: bool,
+    pub qr: bool,
     // operation code
-    opcode: u8,
+    pub opcode: u8,
     // authoritative answer
-    aa: bool,
+    pub aa: bool,
     // truncated message
-    tc: bool,
+    pub tc: bool,
     // recursion desired
-    rd: bool,
+    pub rd: bool,
 
     // recursion available
-    ra: bool,
+    pub ra: bool,
     // reserved
-    z: bool,
+    pub z: bool,
     // authed data
-    ad: bool,
+    pub ad: bool,
     // checking disabled
-    cd: bool,
+    pub cd: bool,
     // response code
-    rcode: RCode,
+    pub rcode: RCode,
 
     // question count
-    qdcount: u16,
+    pub qdcount: u16,
     // answer count
-    ancount: u16,
+    pub ancount: u16,
     // authority count
-    nscount: u16,
+    pub nscount: u16,
     // additional count
-    arcount: u16,
+    pub arcount: u16,
 }
 
 impl FromBytes for DnsHeader {
@@ -378,7 +405,7 @@ impl ToBytes for DnsHeader {
 #[non_exhaustive]
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum QueryType {
+pub enum QueryType {
     A,
     NS,
     CNAME,
@@ -412,9 +439,9 @@ impl From<QueryType> for u16 {
 }
 
 #[derive(Debug)]
-struct DnsQuestion {
-    name: String,
-    r#type: QueryType,
+pub struct DnsQuestion {
+    pub name: String,
+    pub r#type: QueryType,
     class: u16,
 }
 
@@ -448,7 +475,7 @@ fn wire_name_len(name: &str) -> u16 {
 }
 
 #[derive(Debug)]
-struct DnsRecord {
+pub struct DnsRecord {
     domain: String,
     r#type: QueryType,
     class: u16,
@@ -533,54 +560,37 @@ impl ToBytes for DnsRecord {
     }
 }
 
+pub fn lookup(name: &str, qtype: QueryType) -> io::Result<DnsPacket> {
+    let addr = ("8.8.8.8", 53); // google's public DNS
+    let socket = UdpSocket::bind(("0.0.0.0", 0))?;
+
+    let mut query = DnsPacket::new_empty();
+    query.header.id = 6666;
+    query.header.rd = true;
+    query.header.qdcount = 1;
+    query.questions.push(DnsQuestion {
+        name: name.to_string(),
+        r#type: qtype,
+        class: 1,
+    });
+
+    let mut req_buf = [0u8; PACKET_SIZE];
+    query.to_bytes(&mut req_buf).unwrap();
+
+    socket.send_to(&req_buf, addr)?;
+
+    let mut res_buf = [0u8; PACKET_SIZE];
+    socket.recv_from(&mut res_buf)?;
+
+    Ok(DnsPacket::from_bytes(&res_buf).unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::fs::File;
     use std::io::BufReader;
-    use std::net::UdpSocket;
-
-    fn query(name: &str, qtype: QueryType) -> DnsPacket {
-        let query = DnsPacket {
-            header: DnsHeader {
-                id: 6666,
-                qr: false,
-                opcode: 0,
-                aa: false,
-                tc: false,
-                rd: true,
-                ra: false,
-                z: false,
-                ad: false,
-                cd: false,
-                rcode: RCode::Noerror,
-                qdcount: 1,
-                ancount: 0,
-                nscount: 0,
-                arcount: 0,
-            },
-            questions: vec![DnsQuestion {
-                name: name.to_string(),
-                r#type: qtype,
-                class: 1,
-            }],
-            answers: vec![],
-            authorities: vec![],
-            resources: vec![],
-        };
-
-        let mut req_buf = [0u8; PACKET_SIZE];
-        query.to_bytes(&mut req_buf).unwrap();
-
-        let socket = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
-        socket.send_to(&req_buf, ("8.8.8.8", 53)).unwrap();
-
-        let mut res_buf = [0u8; PACKET_SIZE];
-        socket.recv_from(&mut res_buf).unwrap();
-
-        DnsPacket::from_bytes(&res_buf).unwrap()
-    }
 
     #[test]
     fn from_raw_bytes() {
@@ -665,7 +675,7 @@ mod tests {
     #[test]
     #[ignore]
     fn stub_resolver() {
-        let response = query("google.com", QueryType::A);
+        let response = lookup("google.com", QueryType::A).unwrap();
 
         assert_eq!(response.header.id, 6666);
         assert!(response.header.qr);
@@ -693,7 +703,7 @@ mod tests {
     #[test]
     #[ignore]
     fn lookup_yahoo_a() {
-        let response = query("www.yahoo.com", QueryType::A);
+        let response = lookup("www.yahoo.com", QueryType::A).unwrap();
 
         assert_eq!(response.header.rcode, RCode::Noerror);
         assert!(response.header.ancount >= 2);
@@ -714,7 +724,7 @@ mod tests {
     #[test]
     #[ignore]
     fn lookup_yahoo_mx() {
-        let response = query("yahoo.com", QueryType::MX);
+        let response = lookup("yahoo.com", QueryType::MX).unwrap();
 
         assert_eq!(response.header.rcode, RCode::Noerror);
         assert!(response.header.ancount >= 1);
@@ -734,7 +744,7 @@ mod tests {
     #[test]
     #[ignore]
     fn lookup_google_aaaa() {
-        let response = query("google.com", QueryType::AAAA);
+        let response = lookup("google.com", QueryType::AAAA).unwrap();
 
         assert_eq!(response.header.rcode, RCode::Noerror);
         assert!(response.header.ancount >= 1);
