@@ -752,7 +752,7 @@ mod tests {
     #[test]
     #[ignore]
     fn stub_resolver() {
-        let response = lookup("google.com", QueryType::A).unwrap();
+        let response = lookup("google.com", QueryType::A, ("8.8.8.8", 53)).unwrap();
 
         assert_eq!(response.header.id, 6666);
         assert!(response.header.qr);
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     #[ignore]
     fn lookup_yahoo_a() {
-        let response = lookup("www.yahoo.com", QueryType::A).unwrap();
+        let response = lookup("www.yahoo.com", QueryType::A, ("8.8.8.8", 53)).unwrap();
 
         assert_eq!(response.header.rcode, RCode::Noerror);
         assert!(response.header.ancount >= 2);
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     #[ignore]
     fn lookup_yahoo_mx() {
-        let response = lookup("yahoo.com", QueryType::MX).unwrap();
+        let response = lookup("yahoo.com", QueryType::MX, ("8.8.8.8", 53)).unwrap();
 
         assert_eq!(response.header.rcode, RCode::Noerror);
         assert!(response.header.ancount >= 1);
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     #[ignore]
     fn lookup_google_aaaa() {
-        let response = lookup("google.com", QueryType::AAAA).unwrap();
+        let response = lookup("google.com", QueryType::AAAA, ("8.8.8.8", 53)).unwrap();
 
         assert_eq!(response.header.rcode, RCode::Noerror);
         assert!(response.header.ancount >= 1);
