@@ -8,6 +8,21 @@ use std::net::{Ipv4Addr, Ipv6Addr, ToSocketAddrs, UdpSocket};
 pub const PACKET_SIZE: usize = 512;
 const MAX_NAME_JUMPS: u8 = 10;
 
+const A_ROOT_SERVER_NET: Ipv4Addr = Ipv4Addr::new(198, 41, 0, 4);
+const B_ROOT_SERVER_NET: Ipv4Addr = Ipv4Addr::new(170, 247, 170, 2);
+const C_ROOT_SERVER_NET: Ipv4Addr = Ipv4Addr::new(192, 33, 4, 12);
+const D_ROOT_SERVER_NET: Ipv4Addr = Ipv4Addr::new(199, 7, 91, 13);
+
+fn is_authoritative_for(qname: &str, domain: &str) -> bool {
+    qname == domain || qname.ends_with(&format!(".{domain}"))
+}
+
+fn wire_name_len(name: &str) -> u16 {
+    // sum of each label's length + 1 byte per label for the length prefix
+    // + 1 for the terminator
+    (name.split('.').map(|l| l.len() + 1).sum::<usize>() + 1) as u16
+}
+
 #[derive(Debug)]
 struct PacketBufReader<'a> {
     buf: &'a [u8],
@@ -271,6 +286,35 @@ impl DnsPacket {
         reader.read_to_end(&mut buf).ok()?;
         Self::from_bytes(&buf)
     }
+
+    fn get_random_a(&self) -> Option<Ipv4Addr> {
+        self.answers.iter().find_map(|r| match &r.rdata {
+            RData::A { ip } => Some(*ip),
+            _ => None,
+        })
+    }
+
+    fn get_ns<'a>(&'a self, qname: &'a str) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+        self.authorities.iter().filter_map(move |r| match &r.rdata {
+            RData::NS { host } if is_authoritative_for(qname, &r.domain) => {
+                Some((r.domain.as_str(), host.as_str()))
+            }
+            _ => None,
+        })
+    }
+
+    fn get_resolved_ns(&self, qname: &str) -> Option<Ipv4Addr> {
+        self.get_ns(qname).find_map(|(_, ns_host)| {
+            self.resources.iter().find_map(|r| match &r.rdata {
+                RData::A { ip } if r.domain == ns_host => Some(*ip),
+                _ => None,
+            })
+        })
+    }
+
+    fn get_unresolved_ns<'a>(&'a self, qname: &'a str) -> Option<&'a str> {
+        self.get_ns(qname).map(|(_, host)| host).next()
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -468,12 +512,6 @@ impl ToBytes for DnsQuestion {
     }
 }
 
-fn wire_name_len(name: &str) -> u16 {
-    // sum of each label's length + 1 byte per label for the length prefix
-    // + 1 for the terminator
-    (name.split('.').map(|l| l.len() + 1).sum::<usize>() + 1) as u16
-}
-
 #[derive(Debug)]
 pub struct DnsRecord {
     domain: String,
@@ -560,8 +598,47 @@ impl ToBytes for DnsRecord {
     }
 }
 
-pub fn lookup(name: &str, qtype: QueryType) -> io::Result<DnsPacket> {
-    let addr = ("8.8.8.8", 53); // google's public DNS
+pub fn recursive_lookup(name: &str, qtype: QueryType) -> io::Result<DnsPacket> {
+    let mut ns_ip = C_ROOT_SERVER_NET;
+
+    loop {
+        println!("Attempting lookup of {qtype:?} {name:?} with ns {ns_ip}");
+
+        let resp = lookup(name, qtype, (ns_ip, 53))?;
+
+        // return the packet as-is so the caller propagates the correct rcode
+        if (!resp.answers.is_empty() && resp.header.rcode == RCode::Noerror)
+            || resp.header.rcode == RCode::Nxdomain
+        {
+            return Ok(resp);
+        }
+
+        // fast path
+        if let Some(ip) = resp.get_resolved_ns(name) {
+            ns_ip = ip;
+            continue;
+        }
+
+        // slow path
+        match resp.get_unresolved_ns(name) {
+            Some(ns_host) => match recursive_lookup(ns_host, QueryType::A)?.get_random_a() {
+                Some(ip) => ns_ip = ip,
+                None => {
+                    return Err(io::Error::other(
+                        "nameserver hostname did not resolve to an A record",
+                    ));
+                }
+            },
+            None => {
+                return Err(io::Error::other(
+                    "no authoritative nameserver to delegate to",
+                ));
+            }
+        }
+    }
+}
+
+fn lookup(name: &str, qtype: QueryType, server_addr: impl ToSocketAddrs) -> io::Result<DnsPacket> {
     let socket = UdpSocket::bind(("0.0.0.0", 0))?;
 
     let mut query = DnsPacket::new_empty();
@@ -577,7 +654,7 @@ pub fn lookup(name: &str, qtype: QueryType) -> io::Result<DnsPacket> {
     let mut req_buf = [0u8; PACKET_SIZE];
     query.to_bytes(&mut req_buf).unwrap();
 
-    socket.send_to(&req_buf, addr)?;
+    socket.send_to(&req_buf, server_addr)?;
 
     let mut res_buf = [0u8; PACKET_SIZE];
     socket.recv_from(&mut res_buf)?;

@@ -1,7 +1,7 @@
 use std::io;
 use std::net::UdpSocket;
 
-use dns::{DnsPacket, PACKET_SIZE, RCode, lookup};
+use dns::{DnsPacket, PACKET_SIZE, RCode, recursive_lookup};
 
 fn handle_query(socket: &UdpSocket) -> io::Result<DnsPacket> {
     let mut req_buf = [0u8; PACKET_SIZE];
@@ -15,9 +15,8 @@ fn handle_query(socket: &UdpSocket) -> io::Result<DnsPacket> {
     resp.header.ra = true;
 
     if let Some(ques) = req.questions.pop() {
-        //println!("Received query: {ques:?}");
-
-        if let Ok(result) = lookup(&ques.name, ques.r#type) {
+        // println!("Received query: {ques:?}");
+        if let Ok(result) = recursive_lookup(&ques.name, ques.r#type) {
             resp.questions.push(ques);
             resp.header.rcode = req.header.rcode;
 
