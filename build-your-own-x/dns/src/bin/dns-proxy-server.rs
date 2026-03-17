@@ -11,14 +11,16 @@ fn handle_query(socket: &UdpSocket) -> io::Result<DnsPacket> {
 
     let mut resp = DnsPacket::new_empty();
     resp.header.id = req.header.id;
+    resp.header.qr = true;
     resp.header.rd = true;
     resp.header.ra = true;
 
     if let Some(ques) = req.questions.pop() {
         // println!("Received query: {ques:?}");
+
         if let Ok(result) = recursive_lookup(&ques.name, ques.r#type) {
             resp.questions.push(ques);
-            resp.header.rcode = req.header.rcode;
+            resp.header.rcode = result.header.rcode;
 
             for rec in result.answers {
                 //println!("Answer: {:?}", rec);
@@ -38,6 +40,11 @@ fn handle_query(socket: &UdpSocket) -> io::Result<DnsPacket> {
     } else {
         resp.header.rcode = RCode::Formerr;
     }
+
+    resp.header.qdcount = resp.questions.len() as u16;
+    resp.header.ancount = resp.answers.len() as u16;
+    resp.header.nscount = resp.authorities.len() as u16;
+    resp.header.arcount = resp.resources.len() as u16;
 
     let mut resp_buf = [0u8; PACKET_SIZE];
     resp.to_bytes(&mut resp_buf);
