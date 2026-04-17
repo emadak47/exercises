@@ -32,6 +32,22 @@ fn identifier(input: &str) -> Result<(&str, String), &str> {
     Ok((&input[matched.len()..], matched))
 }
 
+fn pair<'a, 'b, F1, F2, O1, O2>(
+    f1: F1,
+    f2: F2,
+) -> impl Fn(&'a str) -> Result<(&'b str, (O1, O2)), &'b str>
+where
+    F1: Fn(&'a str) -> Result<(&'a str, O1), &'a str>,
+    F2: Fn(&'b str) -> Result<(&'b str, O2), &'b str>,
+    'a: 'b,
+{
+    move |input| {
+        let (next_input, o1) = f1(input)?;
+        let (remaining, o2) = f2(next_input)?;
+        Ok((remaining, (o1, o2)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +77,16 @@ mod tests {
             Err("!not at all an identifier"),
             identifier("!not at all an identifier")
         );
+    }
+
+    #[test]
+    fn test_pair() {
+        let tag_opener = pair(match_literal("<"), identifier);
+        assert_eq!(
+            Ok(("/>", ((), "my-first-element".to_string()))),
+            tag_opener("<my-first-element/>")
+        );
+        assert_eq!(Err("oops"), tag_opener("oops"));
+        assert_eq!(Err("!oops"), tag_opener("<!oops"));
     }
 }
