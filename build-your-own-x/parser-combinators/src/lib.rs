@@ -7,7 +7,7 @@ struct Element {
 
 fn match_literal<'a, 'b>(expected: &'a str) -> impl Fn(&'b str) -> Result<(&'b str, ()), &'b str> {
     move |input| match input.split_at_checked(expected.len()) {
-        Some((first, last)) if first == expected => Ok((last, ())),
+        Some((first, remaining)) if first == expected => Ok((remaining, ())),
         _ => Err(input),
     }
 }
