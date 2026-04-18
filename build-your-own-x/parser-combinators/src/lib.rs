@@ -5,14 +5,29 @@ struct Element {
     children: Vec<Element>,
 }
 
-fn match_literal<'a, 'b>(expected: &'a str) -> impl Fn(&'b str) -> Result<(&'b str, ()), &'b str> {
-    move |input| match input.split_at_checked(expected.len()) {
+type ParseResult<'a, Output> = Result<(&'a str, Output), &'a str>;
+
+trait Parser<'a, Output> {
+    fn parse(&self, input: &'a str) -> ParseResult<'a, Output>;
+}
+
+impl<'a, F, Output> Parser<'a, Output> for F
+where
+    F: Fn(&'a str) -> ParseResult<'a, Output>,
+{
+    fn parse(&self, input: &'a str) -> ParseResult<'a, Output> {
+        self(input)
+    }
+}
+
+fn match_literal<'a, 'b>(expected: &'a str) -> impl Parser<'b, ()> {
+    move |input: &'b str| match input.split_at_checked(expected.len()) {
         Some((first, remaining)) if first == expected => Ok((remaining, ())),
         _ => Err(input),
     }
 }
 
-fn identifier(input: &str) -> Result<(&str, String), &str> {
+fn identifier(input: &str) -> ParseResult<'_, String> {
     let mut matched = String::new();
     let mut chars = input.chars();
 
@@ -32,20 +47,43 @@ fn identifier(input: &str) -> Result<(&str, String), &str> {
     Ok((&input[matched.len()..], matched))
 }
 
-fn pair<'a, 'b, F1, F2, O1, O2>(
-    f1: F1,
-    f2: F2,
-) -> impl Fn(&'a str) -> Result<(&'b str, (O1, O2)), &'b str>
+fn pair<'a, P1, P2, O1, O2>(parser1: P1, parser2: P2) -> impl Parser<'a, (O1, O2)>
 where
-    F1: Fn(&'a str) -> Result<(&'a str, O1), &'a str>,
-    F2: Fn(&'b str) -> Result<(&'b str, O2), &'b str>,
-    'a: 'b,
+    P1: Parser<'a, O1>,
+    P2: Parser<'a, O2>,
 {
     move |input| {
-        let (next_input, o1) = f1(input)?;
-        let (remaining, o2) = f2(next_input)?;
+        let (next_input, o1) = parser1.parse(input)?;
+        let (remaining, o2) = parser2.parse(next_input)?;
         Ok((remaining, (o1, o2)))
     }
+}
+
+fn map<'a, P, F, A, B>(parser: P, map_f: F) -> impl Parser<'a, B>
+where
+    P: Parser<'a, A>,
+    F: Fn(A) -> B,
+{
+    move |input| {
+        let (remaining, output) = parser.parse(input)?;
+        Ok((remaining, map_f(output)))
+    }
+}
+
+fn left<'a, P1, P2, O1, O2>(parser1: P1, parser2: P2) -> impl Parser<'a, O1>
+where
+    P1: Parser<'a, O1>,
+    P2: Parser<'a, O2>,
+{
+    map(pair(parser1, parser2), |(o1, _o2)| o1)
+}
+
+fn right<'a, P1, P2, O1, O2>(parser1: P1, parser2: P2) -> impl Parser<'a, O2>
+where
+    P1: Parser<'a, O1>,
+    P2: Parser<'a, O2>,
+{
+    map(pair(parser1, parser2), |(_o1, o2)| o2)
 }
 
 #[cfg(test)]
@@ -55,12 +93,12 @@ mod tests {
     #[test]
     fn test_match_literal() {
         let parse_joe = match_literal("Hello Joe!");
-        assert_eq!(Ok(("", ())), parse_joe("Hello Joe!"));
+        assert_eq!(Ok(("", ())), parse_joe.parse("Hello Joe!"));
         assert_eq!(
             Ok((" Hello Robert!", ())),
-            parse_joe("Hello Joe! Hello Robert!")
+            parse_joe.parse("Hello Joe! Hello Robert!")
         );
-        assert_eq!(Err("Hello Mike!"), parse_joe("Hello Mike!"));
+        assert_eq!(Err("Hello Mike!"), parse_joe.parse("Hello Mike!"));
     }
 
     #[test]
@@ -84,9 +122,20 @@ mod tests {
         let tag_opener = pair(match_literal("<"), identifier);
         assert_eq!(
             Ok(("/>", ((), "my-first-element".to_string()))),
-            tag_opener("<my-first-element/>")
+            tag_opener.parse("<my-first-element/>")
         );
-        assert_eq!(Err("oops"), tag_opener("oops"));
-        assert_eq!(Err("!oops"), tag_opener("<!oops"));
+        assert_eq!(Err("oops"), tag_opener.parse("oops"));
+        assert_eq!(Err("!oops"), tag_opener.parse("<!oops"));
+    }
+
+    #[test]
+    fn test_right() {
+        let tag_opener = right(match_literal("<"), identifier);
+        assert_eq!(
+            Ok(("/>", "my-first-element".to_string())),
+            tag_opener.parse("<my-first-element/>")
+        );
+        assert_eq!(Err("oops"), tag_opener.parse("oops"));
+        assert_eq!(Err("!oops"), tag_opener.parse("<!oops"));
     }
 }
