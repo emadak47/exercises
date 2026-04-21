@@ -86,6 +86,101 @@ where
     map(pair(parser1, parser2), |(_o1, o2)| o2)
 }
 
+fn one_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
+where
+    P: Parser<'a, A>,
+{
+    move |mut input| {
+        let mut result = Vec::new();
+
+        if let Ok((next_input, first_output)) = parser.parse(input) {
+            result.push(first_output);
+            input = next_input;
+        } else {
+            return Err(input);
+        }
+
+        while let Ok((next_input, output)) = parser.parse(input) {
+            result.push(output);
+            input = next_input;
+        }
+
+        Ok((input, result))
+    }
+}
+
+fn zero_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
+where
+    P: Parser<'a, A>,
+{
+    move |mut input| {
+        let mut result = Vec::new();
+
+        while let Ok((next_input, output)) = parser.parse(input) {
+            result.push(output);
+            input = next_input;
+        }
+
+        Ok((input, result))
+    }
+}
+
+fn any_char(input: &str) -> ParseResult<'_, char> {
+    match input.chars().next() {
+        Some(ch) => Ok((&input[ch.len_utf8()..], ch)),
+        None => Err(input),
+    }
+}
+
+fn pred<'a, P, F, O>(parser: P, predicate: F) -> impl Parser<'a, O>
+where
+    P: Parser<'a, O>,
+    F: Fn(&O) -> bool,
+{
+    move |input| {
+        parser.parse(input).and_then(|(remaining, output)| {
+            if predicate(&output) {
+                Ok((remaining, output))
+            } else {
+                Err(input)
+            }
+        })
+    }
+}
+
+fn whitespace_char<'a>() -> impl Parser<'a, char> {
+    pred(any_char, |c| c.is_whitespace())
+}
+
+fn space1<'a>() -> impl Parser<'a, Vec<char>> {
+    one_or_more(whitespace_char())
+}
+
+fn space0<'a>() -> impl Parser<'a, Vec<char>> {
+    zero_or_more(whitespace_char())
+}
+
+fn quoted_string<'a>() -> impl Parser<'a, String> {
+    map(
+        right(
+            match_literal("\""),
+            left(
+                zero_or_more(pred(any_char, |c| *c != '"')),
+                match_literal("\""),
+            ),
+        ),
+        |chars| chars.into_iter().collect(),
+    )
+}
+
+fn attribute_pair<'a>() -> impl Parser<'a, (String, String)> {
+    pair(identifier, right(match_literal("="), quoted_string()))
+}
+
+fn attributes<'a>() -> impl Parser<'a, Vec<(String, String)>> {
+    zero_or_more(right(space1(), attribute_pair()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +232,50 @@ mod tests {
         );
         assert_eq!(Err("oops"), tag_opener.parse("oops"));
         assert_eq!(Err("!oops"), tag_opener.parse("<!oops"));
+    }
+
+    #[test]
+    fn test_one_or_more() {
+        let parser = one_or_more(match_literal("ha"));
+        assert_eq!(Ok(("", vec![(), (), ()])), parser.parse("hahaha"));
+        assert_eq!(Err("ahah"), parser.parse("ahah"));
+        assert_eq!(Err(""), parser.parse(""));
+    }
+
+    #[test]
+    fn test_zero_or_more() {
+        let parser = zero_or_more(match_literal("ha"));
+        assert_eq!(Ok(("", vec![(), (), ()])), parser.parse("hahaha"));
+        assert_eq!(Ok(("ahah", vec![])), parser.parse("ahah"));
+        assert_eq!(Ok(("", vec![])), parser.parse(""));
+    }
+
+    #[test]
+    fn test_predicate() {
+        let parser = pred(any_char, |c| *c == 'o');
+        assert_eq!(Ok(("mg", 'o')), parser.parse("omg"));
+        assert_eq!(Err("lol"), parser.parse("lol"));
+    }
+
+    #[test]
+    fn test_quoted_string() {
+        assert_eq!(
+            Ok(("", "Hello Joe!".to_string())),
+            quoted_string().parse("\"Hello Joe!\"")
+        );
+    }
+
+    #[test]
+    fn test_attribute() {
+        assert_eq!(
+            Ok((
+                "",
+                vec![
+                    ("one".to_string(), "1".to_string()),
+                    ("two".to_string(), "2".to_string())
+                ]
+            )),
+            attributes().parse(" one=\"1\" two=\"2\"")
+        );
     }
 }
