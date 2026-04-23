@@ -9,6 +9,72 @@ type ParseResult<'a, Output> = Result<(&'a str, Output), &'a str>;
 
 trait Parser<'a, Output> {
     fn parse(&self, input: &'a str) -> ParseResult<'a, Output>;
+
+    fn map<B, F>(self, op: F) -> impl Parser<'a, B>
+    where
+        Self: Sized,
+        F: Fn(Output) -> B,
+    {
+        move |input| {
+            let (remaining, output) = self.parse(input)?;
+            Ok((remaining, op(output)))
+        }
+    }
+
+    fn pred<F>(self, f: F) -> impl Parser<'a, Output>
+    where
+        Self: Sized,
+        F: Fn(&Output) -> bool,
+    {
+        move |input| {
+            self.parse(input).and_then(|(remaining, output)| {
+                if f(&output) {
+                    Ok((remaining, output))
+                } else {
+                    Err(input)
+                }
+            })
+        }
+    }
+
+    fn zero_or_more(self) -> impl Parser<'a, Vec<Output>>
+    where
+        Self: Sized,
+    {
+        move |mut input| {
+            let mut result = Vec::new();
+
+            while let Ok((next_input, output)) = self.parse(input) {
+                result.push(output);
+                input = next_input;
+            }
+
+            Ok((input, result))
+        }
+    }
+
+    fn one_or_more(self) -> impl Parser<'a, Vec<Output>>
+    where
+        Self: Sized,
+    {
+        move |mut input| {
+            let mut result = Vec::new();
+
+            if let Ok((next_input, first_output)) = self.parse(input) {
+                result.push(first_output);
+                input = next_input;
+            } else {
+                return Err(input);
+            }
+
+            while let Ok((next_input, output)) = self.parse(input) {
+                result.push(output);
+                input = next_input;
+            }
+
+            Ok((input, result))
+        }
+    }
 }
 
 impl<'a, F, Output> Parser<'a, Output> for F
@@ -59,23 +125,12 @@ where
     }
 }
 
-fn map<'a, P, F, A, B>(parser: P, map_f: F) -> impl Parser<'a, B>
-where
-    P: Parser<'a, A>,
-    F: Fn(A) -> B,
-{
-    move |input| {
-        let (remaining, output) = parser.parse(input)?;
-        Ok((remaining, map_f(output)))
-    }
-}
-
 fn left<'a, P1, P2, O1, O2>(parser1: P1, parser2: P2) -> impl Parser<'a, O1>
 where
     P1: Parser<'a, O1>,
     P2: Parser<'a, O2>,
 {
-    map(pair(parser1, parser2), |(o1, _o2)| o1)
+    pair(parser1, parser2).map(|(o1, _o2)| o1)
 }
 
 fn right<'a, P1, P2, O1, O2>(parser1: P1, parser2: P2) -> impl Parser<'a, O2>
@@ -83,46 +138,7 @@ where
     P1: Parser<'a, O1>,
     P2: Parser<'a, O2>,
 {
-    map(pair(parser1, parser2), |(_o1, o2)| o2)
-}
-
-fn one_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
-where
-    P: Parser<'a, A>,
-{
-    move |mut input| {
-        let mut result = Vec::new();
-
-        if let Ok((next_input, first_output)) = parser.parse(input) {
-            result.push(first_output);
-            input = next_input;
-        } else {
-            return Err(input);
-        }
-
-        while let Ok((next_input, output)) = parser.parse(input) {
-            result.push(output);
-            input = next_input;
-        }
-
-        Ok((input, result))
-    }
-}
-
-fn zero_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
-where
-    P: Parser<'a, A>,
-{
-    move |mut input| {
-        let mut result = Vec::new();
-
-        while let Ok((next_input, output)) = parser.parse(input) {
-            result.push(output);
-            input = next_input;
-        }
-
-        Ok((input, result))
-    }
+    pair(parser1, parser2).map(|(_o1, o2)| o2)
 }
 
 fn any_char(input: &str) -> ParseResult<'_, char> {
@@ -132,45 +148,27 @@ fn any_char(input: &str) -> ParseResult<'_, char> {
     }
 }
 
-fn pred<'a, P, F, O>(parser: P, predicate: F) -> impl Parser<'a, O>
-where
-    P: Parser<'a, O>,
-    F: Fn(&O) -> bool,
-{
-    move |input| {
-        parser.parse(input).and_then(|(remaining, output)| {
-            if predicate(&output) {
-                Ok((remaining, output))
-            } else {
-                Err(input)
-            }
-        })
-    }
-}
-
 fn whitespace_char<'a>() -> impl Parser<'a, char> {
-    pred(any_char, |c| c.is_whitespace())
+    any_char.pred(|c| c.is_whitespace())
 }
 
 fn space1<'a>() -> impl Parser<'a, Vec<char>> {
-    one_or_more(whitespace_char())
+    whitespace_char().one_or_more()
 }
 
 fn space0<'a>() -> impl Parser<'a, Vec<char>> {
-    zero_or_more(whitespace_char())
+    whitespace_char().zero_or_more()
 }
 
 fn quoted_string<'a>() -> impl Parser<'a, String> {
-    map(
-        right(
+    right(
+        match_literal("\""),
+        left(
+            any_char.pred(|c| *c != '"').zero_or_more(),
             match_literal("\""),
-            left(
-                zero_or_more(pred(any_char, |c| *c != '"')),
-                match_literal("\""),
-            ),
         ),
-        |chars| chars.into_iter().collect(),
     )
+    .map(|chars| chars.into_iter().collect())
 }
 
 fn attribute_pair<'a>() -> impl Parser<'a, (String, String)> {
@@ -178,7 +176,7 @@ fn attribute_pair<'a>() -> impl Parser<'a, (String, String)> {
 }
 
 fn attributes<'a>() -> impl Parser<'a, Vec<(String, String)>> {
-    zero_or_more(right(space1(), attribute_pair()))
+    right(space1(), attribute_pair()).zero_or_more()
 }
 
 #[cfg(test)]
@@ -236,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_one_or_more() {
-        let parser = one_or_more(match_literal("ha"));
+        let parser = match_literal("ha").one_or_more();
         assert_eq!(Ok(("", vec![(), (), ()])), parser.parse("hahaha"));
         assert_eq!(Err("ahah"), parser.parse("ahah"));
         assert_eq!(Err(""), parser.parse(""));
@@ -244,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_zero_or_more() {
-        let parser = zero_or_more(match_literal("ha"));
+        let parser = match_literal("ha").zero_or_more();
         assert_eq!(Ok(("", vec![(), (), ()])), parser.parse("hahaha"));
         assert_eq!(Ok(("ahah", vec![])), parser.parse("ahah"));
         assert_eq!(Ok(("", vec![])), parser.parse(""));
@@ -252,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_predicate() {
-        let parser = pred(any_char, |c| *c == 'o');
+        let parser = any_char.pred(|c| *c == 'o');
         assert_eq!(Ok(("mg", 'o')), parser.parse("omg"));
         assert_eq!(Err("lol"), parser.parse("lol"));
     }
