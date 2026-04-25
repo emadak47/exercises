@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Element {
     name: String,
     attributes: Vec<(String, String)>,
@@ -179,6 +179,18 @@ fn attributes<'a>() -> impl Parser<'a, Vec<(String, String)>> {
     right(space1(), attribute_pair()).zero_or_more()
 }
 
+fn element_start<'a>() -> impl Parser<'a, (String, Vec<(String, String)>)> {
+    right(match_literal("<"), pair(identifier, attributes()))
+}
+
+fn single_element<'a>() -> impl Parser<'a, Element> {
+    left(element_start(), match_literal("/>")).map(|(name, attributes)| Element {
+        name,
+        attributes,
+        children: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +286,21 @@ mod tests {
                 ]
             )),
             attributes().parse(" one=\"1\" two=\"2\"")
+        );
+    }
+
+    #[test]
+    fn test_single_element() {
+        assert_eq!(
+            Ok((
+                "",
+                Element {
+                    name: "div".to_string(),
+                    attributes: vec![("class".to_string(), "float".to_string())],
+                    children: vec![]
+                }
+            )),
+            single_element().parse("<div class=\"float\"/>")
         );
     }
 }
