@@ -234,8 +234,15 @@ fn parent_element<'a>() -> impl Parser<'a, Element> {
     })
 }
 
+fn whitespace_wrap<'a, P, A>(parser: P) -> impl Parser<'a, A>
+where
+    P: Parser<'a, A>,
+{
+    right(space0(), left(parser, space0()))
+}
+
 fn element(input: &str) -> ParseResult<'_, Element> {
-    either(single_element(), parent_element()).parse(input)
+    whitespace_wrap(either(single_element(), parent_element())).parse(input)
 }
 
 #[cfg(test)]
@@ -381,5 +388,14 @@ mod tests {
             ],
         };
         assert_eq!(Ok(("", parsed_doc)), element.parse(doc));
+    }
+
+    #[test]
+    fn test_mismatched_closing_tag() {
+        let doc = r#"
+        <top>
+            <bottom/>
+        </middle>"#;
+        assert_eq!(Err("</middle>"), element(doc));
     }
 }
