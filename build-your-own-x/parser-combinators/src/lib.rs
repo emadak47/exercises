@@ -37,6 +37,18 @@ trait Parser<'a, Output> {
         }
     }
 
+    fn and_then<F, P, A>(self, f: F) -> impl Parser<'a, A>
+    where
+        Self: Sized,
+        P: Parser<'a, A>,
+        F: Fn(Output) -> P,
+    {
+        move |input| {
+            let (remaining, output) = self.parse(input)?;
+            f(output).parse(remaining)
+        }
+    }
+
     fn zero_or_more(self) -> impl Parser<'a, Vec<Output>>
     where
         Self: Sized,
@@ -188,6 +200,43 @@ fn single_element<'a>() -> impl Parser<'a, Element> {
         name,
         attributes,
         children: Vec::new(),
+    })
+}
+
+fn either<'a, P1, P2, O>(parser1: P1, parser2: P2) -> impl Parser<'a, O>
+where
+    P1: Parser<'a, O>,
+    P2: Parser<'a, O>,
+{
+    move |input| parser1.parse(input).or_else(|_| parser2.parse(input))
+}
+
+fn open_element<'a>() -> impl Parser<'a, Element> {
+    left(element_start(), match_literal(">")).map(|(name, attributes)| Element {
+        name,
+        attributes,
+        children: Vec::new(),
+    })
+}
+
+fn element<'a>() -> impl Parser<'a, Element> {
+    either(single_element(), open_element())
+}
+
+fn close_element<'a>(expected: String) -> impl Parser<'a, String> {
+    right(match_literal("</"), left(identifier, match_literal(">")))
+        .pred(move |name| name == &expected)
+}
+
+fn parent_element<'a>() -> impl Parser<'a, Element> {
+    open_element().and_then(|el| {
+        left(element().zero_or_more(), close_element(el.name.clone())).map(move |children| {
+            Element {
+                name: el.name.clone(),
+                attributes: el.attributes.clone(),
+                children,
+            }
+        })
     })
 }
 
