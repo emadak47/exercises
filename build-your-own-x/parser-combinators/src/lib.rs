@@ -219,10 +219,6 @@ fn open_element<'a>() -> impl Parser<'a, Element> {
     })
 }
 
-fn element<'a>() -> impl Parser<'a, Element> {
-    either(single_element(), open_element())
-}
-
 fn close_element<'a>(expected: String) -> impl Parser<'a, String> {
     right(match_literal("</"), left(identifier, match_literal(">")))
         .pred(move |name| name == &expected)
@@ -230,14 +226,16 @@ fn close_element<'a>(expected: String) -> impl Parser<'a, String> {
 
 fn parent_element<'a>() -> impl Parser<'a, Element> {
     open_element().and_then(|el| {
-        left(element().zero_or_more(), close_element(el.name.clone())).map(move |children| {
-            Element {
-                name: el.name.clone(),
-                attributes: el.attributes.clone(),
-                children,
-            }
+        left(element.zero_or_more(), close_element(el.name.clone())).map(move |children| Element {
+            name: el.name.clone(),
+            attributes: el.attributes.clone(),
+            children,
         })
     })
+}
+
+fn element(input: &str) -> ParseResult<'_, Element> {
+    either(single_element(), parent_element()).parse(input)
 }
 
 #[cfg(test)]
@@ -351,5 +349,37 @@ mod tests {
             )),
             single_element().parse("<div class=\"float\"/>")
         );
+    }
+
+    #[test]
+    fn test_xml_parser() {
+        let doc = r#"
+        <top label="Top">
+            <semi-bottom label="Bottom"/>
+            <middle>
+                <bottom label="Another bottom"/>
+            </middle>
+        </top>"#;
+        let parsed_doc = Element {
+            name: "top".to_string(),
+            attributes: vec![("label".to_string(), "Top".to_string())],
+            children: vec![
+                Element {
+                    name: "semi-bottom".to_string(),
+                    attributes: vec![("label".to_string(), "Bottom".to_string())],
+                    children: vec![],
+                },
+                Element {
+                    name: "middle".to_string(),
+                    attributes: vec![],
+                    children: vec![Element {
+                        name: "bottom".to_string(),
+                        attributes: vec![("label".to_string(), "Another bottom".to_string())],
+                        children: vec![],
+                    }],
+                },
+            ],
+        };
+        assert_eq!(Ok(("", parsed_doc)), element.parse(doc));
     }
 }
